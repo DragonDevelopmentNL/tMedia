@@ -1,4 +1,4 @@
-# 🚀 TBerichten - Your Fun Social Space!
+# 🚀 tMedia - Your Fun Social Space!
 
 Hey there! 👋 Welcome to TBerichten, where social media meets fun! We're not just another social platform - we're your digital playground for sharing thoughts, connecting with friends, and spreading joy! 
 
