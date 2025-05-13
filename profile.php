@@ -1,174 +1,102 @@
 <?php
-session_start();
-require_once "config/database.php";
+require_once __DIR__ . "/config/database.php";
+require_once __DIR__ . "/config/config.php";
 
-// Check if user is logged in
-if(!isset($_SESSION["loggedin"]) || $_SESSION["loggedin"] !== true){
-    header("location: login.php");
-    exit;
+// Require login
+require_login();
+
+// Get profile user ID from URL or use current user's ID
+$profile_user_id = isset($_GET['id']) ? (int)$_GET['id'] : get_current_user_id();
+$current_user_id = get_current_user_id();
+
+// Check if current user is following the profile user
+$is_following = false;
+if ($profile_user_id !== $current_user_id) {
+    $check_sql = "SELECT 1 FROM follows WHERE follower_id = ? AND following_id = ?";
+    $check_stmt = mysqli_prepare($conn, $check_sql);
+    mysqli_stmt_bind_param($check_stmt, "ii", $current_user_id, $profile_user_id);
+    mysqli_stmt_execute($check_stmt);
+    mysqli_stmt_store_result($check_stmt);
+    $is_following = mysqli_stmt_num_rows($check_stmt) > 0;
 }
 
-$user_id = $_SESSION["id"];
-$username = $_SESSION["username"];
-$email = "";
-$bio = "";
-$profile_image = "";
-$error = "";
-$success = "";
-
-// Get user data
-$sql = "SELECT email, bio, profile_image FROM users WHERE id = ?";
-if($stmt = mysqli_prepare($conn, $sql)){
-    mysqli_stmt_bind_param($stmt, "i", $user_id);
-    if(mysqli_stmt_execute($stmt)){
-        mysqli_stmt_store_result($stmt);
-        mysqli_stmt_bind_result($stmt, $email, $bio, $profile_image);
-        mysqli_stmt_fetch($stmt);
+// Handle follow/unfollow action
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['follow_action'])) {
+    if ($profile_user_id !== $current_user_id) {
+        if ($_POST['follow_action'] === 'follow') {
+            $sql = "INSERT INTO follows (follower_id, following_id) VALUES (?, ?)";
+            $stmt = mysqli_prepare($conn, $sql);
+            mysqli_stmt_bind_param($stmt, "ii", $current_user_id, $profile_user_id);
+            mysqli_stmt_execute($stmt);
+            $is_following = true;
+        } else {
+            $sql = "DELETE FROM follows WHERE follower_id = ? AND following_id = ?";
+            $stmt = mysqli_prepare($conn, $sql);
+            mysqli_stmt_bind_param($stmt, "ii", $current_user_id, $profile_user_id);
+            mysqli_stmt_execute($stmt);
+            $is_following = false;
+        }
     }
+}
+
+// Get profile information
+$sql = "SELECT u.*, 
+        (SELECT COUNT(*) FROM posts WHERE user_id = u.id) as post_count,
+        (SELECT COUNT(*) FROM follows WHERE follower_id = u.id) as following_count,
+        (SELECT COUNT(*) FROM follows WHERE following_id = u.id) as followers_count
+        FROM users u 
+        WHERE u.id = ?";
+
+try {
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        throw new Exception("Database error: " . mysqli_error($conn));
+    }
+    
+    mysqli_stmt_bind_param($stmt, "i", $profile_user_id);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception("Error executing query: " . mysqli_stmt_error($stmt));
+    }
+    
+    $result = mysqli_stmt_get_result($stmt);
+    if (!$result) {
+        throw new Exception("Error getting result: " . mysqli_error($conn));
+    }
+    
+    $profile = mysqli_fetch_assoc($result);
     mysqli_stmt_close($stmt);
+} catch (Exception $e) {
+    die("Error: " . $e->getMessage());
 }
 
-// Handle form submission
-if($_SERVER["REQUEST_METHOD"] == "POST"){
-    if(isset($_POST["update_profile"])){
-        $new_username = trim($_POST["username"]);
-        $new_email = trim($_POST["email"]);
-        $new_bio = trim($_POST["bio"]);
-        
-        // Validate username
-        if(empty($new_username)){
-            $error = "Please enter username.";
-        } elseif(!preg_match('/^[a-zA-Z0-9_]+$/', $new_username)){
-            $error = "Username can only contain letters, numbers, and underscores.";
-        } else{
-            // Check if username is taken
-            $sql = "SELECT id FROM users WHERE username = ? AND id != ?";
-            if($stmt = mysqli_prepare($conn, $sql)){
-                mysqli_stmt_bind_param($stmt, "si", $new_username, $user_id);
-                if(mysqli_stmt_execute($stmt)){
-                    mysqli_stmt_store_result($stmt);
-                    if(mysqli_stmt_num_rows($stmt) > 0){
-                        $error = "This username is already taken.";
-                    }
-                }
-                mysqli_stmt_close($stmt);
-            }
-        }
-        
-        // Validate email
-        if(empty($new_email)){
-            $error = "Please enter an email address.";
-        } elseif(!filter_var($new_email, FILTER_VALIDATE_EMAIL)){
-            $error = "Please enter a valid email address.";
-        }
-        
-        if(empty($error)){
-            $sql = "UPDATE users SET username = ?, email = ?, bio = ? WHERE id = ?";
-            if($stmt = mysqli_prepare($conn, $sql)){
-                mysqli_stmt_bind_param($stmt, "sssi", $new_username, $new_email, $new_bio, $user_id);
-                if(mysqli_stmt_execute($stmt)){
-                    $_SESSION["username"] = $new_username;
-                    $username = $new_username;
-                    $email = $new_email;
-                    $bio = $new_bio;
-                    $success = "Profile updated successfully!";
-                } else{
-                    $error = "Something went wrong. Please try again later.";
-                }
-                mysqli_stmt_close($stmt);
-            }
-        }
-    } elseif(isset($_POST["change_password"])){
-        $current_password = trim($_POST["current_password"]);
-        $new_password = trim($_POST["new_password"]);
-        $confirm_password = trim($_POST["confirm_password"]);
-        
-        // Validate current password
-        $sql = "SELECT password FROM users WHERE id = ?";
-        if($stmt = mysqli_prepare($conn, $sql)){
-            mysqli_stmt_bind_param($stmt, "i", $user_id);
-            if(mysqli_stmt_execute($stmt)){
-                mysqli_stmt_store_result($stmt);
-                mysqli_stmt_bind_result($stmt, $hashed_password);
-                mysqli_stmt_fetch($stmt);
-                
-                if(!password_verify($current_password, $hashed_password)){
-                    $error = "Current password is incorrect.";
-                }
-            }
-            mysqli_stmt_close($stmt);
-        }
-        
-        // Validate new password
-        if(empty($new_password)){
-            $error = "Please enter a new password.";
-        } elseif(strlen($new_password) < 6){
-            $error = "Password must have at least 6 characters.";
-        }
-        
-        // Validate confirm password
-        if(empty($confirm_password)){
-            $error = "Please confirm the new password.";
-        } elseif($new_password != $confirm_password){
-            $error = "Passwords do not match.";
-        }
-        
-        if(empty($error)){
-            $sql = "UPDATE users SET password = ? WHERE id = ?";
-            if($stmt = mysqli_prepare($conn, $sql)){
-                $param_password = password_hash($new_password, PASSWORD_DEFAULT);
-                mysqli_stmt_bind_param($stmt, "si", $param_password, $user_id);
-                if(mysqli_stmt_execute($stmt)){
-                    $success = "Password changed successfully!";
-                } else{
-                    $error = "Something went wrong. Please try again later.";
-                }
-                mysqli_stmt_close($stmt);
-            }
-        }
-    } elseif(isset($_FILES["profile_image"])){
-        $target_dir = "uploads/";
-        $file_extension = strtolower(pathinfo($_FILES["profile_image"]["name"], PATHINFO_EXTENSION));
-        $new_filename = $user_id . "_" . time() . "." . $file_extension;
-        $target_file = $target_dir . $new_filename;
-        
-        // Check if image file is a actual image or fake image
-        $check = getimagesize($_FILES["profile_image"]["tmp_name"]);
-        if($check === false){
-            $error = "File is not an image.";
-        }
-        
-        // Check file size
-        if($_FILES["profile_image"]["size"] > 5000000){
-            $error = "File is too large. Maximum size is 5MB.";
-        }
-        
-        // Allow certain file formats
-        if($file_extension != "jpg" && $file_extension != "png" && $file_extension != "jpeg" && $file_extension != "gif"){
-            $error = "Only JPG, JPEG, PNG & GIF files are allowed.";
-        }
-        
-        if(empty($error)){
-            if(move_uploaded_file($_FILES["profile_image"]["tmp_name"], $target_file)){
-                $sql = "UPDATE users SET profile_image = ? WHERE id = ?";
-                if($stmt = mysqli_prepare($conn, $sql)){
-                    mysqli_stmt_bind_param($stmt, "si", $new_filename, $user_id);
-                    if(mysqli_stmt_execute($stmt)){
-                        $profile_image = $new_filename;
-                        $success = "Profile image updated successfully!";
-                    } else{
-                        $error = "Something went wrong. Please try again later.";
-                    }
-                    mysqli_stmt_close($stmt);
-                }
-            } else{
-                $error = "Failed to upload image.";
-            }
-        }
+// Get user's posts
+$sql = "SELECT p.*, 
+        (SELECT COUNT(*) FROM likes WHERE post_id = p.id) as like_count,
+        (SELECT COUNT(*) FROM comments WHERE post_id = p.id) as comment_count
+        FROM posts p 
+        WHERE p.user_id = ? 
+        ORDER BY p.created_at DESC";
+
+try {
+    $stmt = mysqli_prepare($conn, $sql);
+    if (!$stmt) {
+        throw new Exception("Database error: " . mysqli_error($conn));
     }
+    
+    mysqli_stmt_bind_param($stmt, "i", $profile_user_id);
+    if (!mysqli_stmt_execute($stmt)) {
+        throw new Exception("Error executing query: " . mysqli_stmt_error($stmt));
+    }
+    
+    $posts_result = mysqli_stmt_get_result($stmt);
+    if (!$posts_result) {
+        throw new Exception("Error getting result: " . mysqli_error($conn));
+    }
+    
+    mysqli_stmt_close($stmt);
+} catch (Exception $e) {
+    die("Error: " . $e->getMessage());
 }
-
-mysqli_close($conn);
 ?>
 
 <!DOCTYPE html>
@@ -176,92 +104,402 @@ mysqli_close($conn);
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>My Profile - TBerichten</title>
-    <link rel="stylesheet" href="assets/css/style.css">
+    <title>Profile - TBerichten</title>
+    <link rel="stylesheet" href="<?php echo get_asset_url('css/style.css'); ?>">
+    <style>
+        .profile-container {
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .profile-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 30px;
+            padding: 30px;
+            background: #fff;
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .profile-image {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            margin-right: 30px;
+            object-fit: cover;
+            border: 4px solid #fff;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .profile-info {
+            flex: 1;
+        }
+        .profile-info h2 {
+            margin: 0 0 10px 0;
+            color: #333;
+            font-size: 24px;
+        }
+        .profile-bio {
+            color: #666;
+            margin-bottom: 15px;
+            line-height: 1.5;
+        }
+        .profile-stats {
+            display: flex;
+            gap: 30px;
+            margin-top: 20px;
+        }
+        .stat {
+            text-align: center;
+            padding: 10px 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            min-width: 100px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .stat:hover {
+            background: #e9ecef;
+        }
+        .stat-value {
+            font-weight: bold;
+            font-size: 1.4em;
+            color: #007bff;
+            margin-bottom: 5px;
+        }
+        .stat-label {
+            color: #666;
+            font-size: 0.9em;
+        }
+        .follow-btn {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 8px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+            margin-top: 15px;
+        }
+        .follow-btn:hover {
+            background-color: #0056b3;
+        }
+        .follow-btn.following {
+            background-color: #6c757d;
+        }
+        .follow-btn.following:hover {
+            background-color: #5a6268;
+        }
+        .posts-container {
+            margin-top: 30px;
+        }
+        .post {
+            background: #fff;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            position: relative;
+        }
+        .post-content {
+            margin: 10px 0;
+            line-height: 1.6;
+            color: #333;
+        }
+        .post-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #eee;
+        }
+        .post-actions {
+            display: flex;
+            gap: 15px;
+        }
+        .action-btn {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 8px 15px;
+            border-radius: 20px;
+            color: #666;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .action-btn:hover {
+            background-color: #f0f0f0;
+            color: #333;
+        }
+        .delete-btn {
+            color: #dc3545;
+        }
+        .delete-btn:hover {
+            background-color: #ffebee;
+        }
+        .post-date {
+            color: #999;
+            font-size: 0.9em;
+        }
+        .no-posts {
+            text-align: center;
+            padding: 40px;
+            background: #fff;
+            border-radius: 15px;
+            color: #666;
+        }
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background-color: #007bff;
+            color: white;
+        }
+        .btn-primary:hover {
+            background-color: #0056b3;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+        }
+        .modal-content {
+            background: white;
+            width: 90%;
+            max-width: 500px;
+            margin: 50px auto;
+            padding: 20px;
+            border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .modal-header h3 {
+            margin: 0;
+            color: #333;
+        }
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #666;
+        }
+        .user-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .user-item {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .user-item:last-child {
+            border-bottom: none;
+        }
+        .user-item img {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        .user-item a {
+            color: #333;
+            text-decoration: none;
+            font-weight: 500;
+        }
+        .user-item a:hover {
+            text-decoration: underline;
+        }
+    </style>
 </head>
 <body>
     <nav class="navbar">
         <div class="nav-brand">TBerichten</div>
         <div class="nav-links">
-            <a href="index.php">Home</a>
-            <a href="profile.php">My Profile</a>
-            <a href="create-post.php">New Post</a>
-            <a href="logout.php">Logout</a>
+            <a href="<?php echo get_url('index.php'); ?>">Home</a>
+            <a href="<?php echo get_url('profile.php'); ?>" class="active">Profile</a>
+            <a href="<?php echo get_url('settings.php'); ?>">Settings</a>
+            <a href="<?php echo get_url('logout.php'); ?>">Logout</a>
         </div>
     </nav>
 
-    <div class="container">
+    <main class="container">
         <div class="profile-container">
             <div class="profile-header">
-                <div class="profile-image-container">
-                    <?php if(!empty($profile_image)): ?>
-                        <img src="uploads/<?php echo htmlspecialchars($profile_image); ?>" alt="Profile Image" class="profile-image">
-                    <?php else: ?>
-                        <div class="profile-image-placeholder">
-                            <?php echo strtoupper(substr($username, 0, 1)); ?>
-                        </div>
+                <img src="<?php echo get_asset_url($profile['profile_image'] ?? 'images/default-profile.png'); ?>" alt="Profile" class="profile-image">
+                <div class="profile-info">
+                    <h2><?php echo h($profile['username']); ?></h2>
+                    <p class="profile-bio"><?php echo h($profile['bio'] ?? 'No bio yet.'); ?></p>
+                    <?php if ($profile_user_id !== $current_user_id): ?>
+                        <form method="post" style="display: inline;">
+                            <input type="hidden" name="follow_action" value="<?php echo $is_following ? 'unfollow' : 'follow'; ?>">
+                            <button type="submit" class="follow-btn <?php echo $is_following ? 'following' : ''; ?>">
+                                <?php echo $is_following ? 'Following' : 'Follow'; ?>
+                            </button>
+                        </form>
                     <?php endif; ?>
-                    <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post" enctype="multipart/form-data" class="profile-image-form">
-                        <input type="file" name="profile_image" id="profile_image" accept="image/*" style="display: none;">
-                        <label for="profile_image" class="btn btn-secondary">Change Photo</label>
-                    </form>
+                    <div class="profile-stats">
+                        <div class="stat" onclick="showModal('followers')">
+                            <div class="stat-value"><?php echo $profile['followers_count']; ?></div>
+                            <div class="stat-label">Followers</div>
+                        </div>
+                        <div class="stat" onclick="showModal('following')">
+                            <div class="stat-value"><?php echo $profile['following_count']; ?></div>
+                            <div class="stat-label">Following</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-value"><?php echo $profile['post_count']; ?></div>
+                            <div class="stat-label">Posts</div>
+                        </div>
+                    </div>
                 </div>
-                <h1><?php echo htmlspecialchars($username); ?>'s Profile</h1>
             </div>
 
-            <?php if(!empty($error)): ?>
-                <div class="alert alert-danger"><?php echo $error; ?></div>
-            <?php endif; ?>
-            <?php if(!empty($success)): ?>
-                <div class="alert alert-success"><?php echo $success; ?></div>
-            <?php endif; ?>
+            <div class="posts-container">
+                <h3>Posts</h3>
+                <?php if (mysqli_num_rows($posts_result) > 0): ?>
+                    <?php while($post = mysqli_fetch_assoc($posts_result)): ?>
+                        <div class="post" id="post-<?php echo $post['id']; ?>">
+                            <div class="post-content">
+                                <?php echo nl2br(h($post['content'])); ?>
+                            </div>
+                            <div class="post-meta">
+                                <div class="post-date">
+                                    <?php echo date('F j, Y g:i a', strtotime($post['created_at'])); ?>
+                                </div>
+                                <div class="post-actions">
+                                    <button class="action-btn">
+                                        <span class="like-count"><?php echo $post['like_count']; ?></span> Likes
+                                    </button>
+                                    <button class="action-btn">
+                                        <span class="comment-count"><?php echo $post['comment_count']; ?></span> Comments
+                                    </button>
+                                    <?php if ($profile_user_id === $current_user_id): ?>
+                                        <button class="action-btn delete-btn" onclick="deletePost(<?php echo $post['id']; ?>)">
+                                            Delete
+                                        </button>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        </div>
+                    <?php endwhile; ?>
+                <?php else: ?>
+                    <div class="no-posts">
+                        <p>No posts yet.</p>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+    </main>
 
-            <div class="profile-sections">
-                <div class="profile-section">
-                    <h2>Profile Information</h2>
-                    <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
-                        <div class="form-group">
-                            <label>Username</label>
-                            <input type="text" name="username" class="form-control" value="<?php echo htmlspecialchars($username); ?>" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Email Address</label>
-                            <input type="email" name="email" class="form-control" value="<?php echo htmlspecialchars($email); ?>" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Bio</label>
-                            <textarea name="bio" class="form-control" rows="4"><?php echo htmlspecialchars($bio); ?></textarea>
-                        </div>
-                        <div class="form-group">
-                            <input type="submit" name="update_profile" class="btn btn-primary" value="Update Profile">
-                        </div>
-                    </form>
-                </div>
-
-                <div class="profile-section">
-                    <h2>Change Password</h2>
-                    <form action="<?php echo htmlspecialchars($_SERVER["PHP_SELF"]); ?>" method="post">
-                        <div class="form-group">
-                            <label>Current Password</label>
-                            <input type="password" name="current_password" class="form-control" required>
-                        </div>
-                        <div class="form-group">
-                            <label>New Password</label>
-                            <input type="password" name="new_password" class="form-control" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Confirm New Password</label>
-                            <input type="password" name="confirm_password" class="form-control" required>
-                        </div>
-                        <div class="form-group">
-                            <input type="submit" name="change_password" class="btn btn-primary" value="Change Password">
-                        </div>
-                    </form>
-                </div>
+    <!-- Followers Modal -->
+    <div id="followersModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Followers</h3>
+                <button class="close-btn" onclick="closeModal('followers')">&times;</button>
+            </div>
+            <div class="user-list" id="followersList">
+                <!-- Will be populated by JavaScript -->
             </div>
         </div>
     </div>
 
-    <script src="assets/js/main.js"></script>
+    <!-- Following Modal -->
+    <div id="followingModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Following</h3>
+                <button class="close-btn" onclick="closeModal('following')">&times;</button>
+            </div>
+            <div class="user-list" id="followingList">
+                <!-- Will be populated by JavaScript -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+    function deletePost(postId) {
+        if (confirm('Are you sure you want to delete this post?')) {
+            const formData = new FormData();
+            formData.append('post_id', postId);
+            
+            fetch('<?php echo get_url("api/delete_post.php"); ?>', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    const post = document.getElementById('post-' + postId);
+                    if (post) {
+                        post.remove();
+                    }
+                } else {
+                    alert('Error deleting post: ' + (data.error || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                alert('Error deleting post: ' + error);
+            });
+        }
+    }
+
+    function showModal(type) {
+        const modal = document.getElementById(type + 'Modal');
+        const list = document.getElementById(type + 'List');
+        
+        // Fetch users
+        fetch('<?php echo get_url("api/get_" . type . ".php"); ?>?user_id=<?php echo $profile_user_id; ?>')
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    list.innerHTML = data.users.map(user => `
+                        <div class="user-item">
+                            <img src="${user.profile_image || '<?php echo get_asset_url("images/default-profile.png"); ?>'}" alt="Profile">
+                            <a href="<?php echo get_url("profile.php?id="); ?>${user.id}">${user.username}</a>
+                        </div>
+                    `).join('');
+                } else {
+                    list.innerHTML = '<p>Error loading users.</p>';
+                }
+            })
+            .catch(error => {
+                list.innerHTML = '<p>Error loading users.</p>';
+            });
+        
+        modal.style.display = 'block';
+    }
+
+    function closeModal(type) {
+        document.getElementById(type + 'Modal').style.display = 'none';
+    }
+
+    // Close modal when clicking outside
+    window.onclick = function(event) {
+        if (event.target.classList.contains('modal')) {
+            event.target.style.display = 'none';
+        }
+    }
+    </script>
 </body>
 </html> 
